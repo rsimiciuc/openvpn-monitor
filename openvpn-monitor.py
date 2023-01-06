@@ -46,6 +46,7 @@ except ImportError:
 
 import argparse
 import os
+import time
 import re
 import socket
 import string
@@ -55,6 +56,8 @@ from humanize import naturalsize
 from collections import OrderedDict, deque
 from pprint import pformat
 from semantic_version import Version as semver
+from influxdb_client import InfluxDBClient, Point, WriteOptions
+from influxdb_client.client.write_api import SYNCHRONOUS
 
 if sys.version_info[0] == 2:
     reload(sys) # noqa
@@ -133,7 +136,12 @@ class ConfigLoader(object):
         self.settings = {'site': 'Default Site',
                          'maps': 'True',
                          'geoip_data': '/usr/share/GeoIP/GeoIPCity.dat',
-                         'datetime_format': '%d/%m/%Y %H:%M:%S'}
+                         'datetime_format': '%d/%m/%Y %H:%M:%S',
+                         'influxdb_url': '',
+                         'influxdb_token': '',
+                         'influxdb_bucket': '',
+                         'influxdb_org': '',
+                         'interval': 1}
         self.vpns['Default VPN'] = {'name': 'default',
                                     'host': 'localhost',
                                     'port': '5555',
@@ -141,7 +149,7 @@ class ConfigLoader(object):
                                     'show_disconnect': False}
 
     def parse_global_section(self, config):
-        global_vars = ['site', 'logo', 'latitude', 'longitude', 'maps', 'maps_height', 'geoip_data', 'datetime_format']
+        global_vars = ['interval', 'site', 'logo', 'latitude', 'longitude', 'maps', 'maps_height', 'geoip_data', 'datetime_format', 'influxdb_url', 'influxdb_token', 'influxdb_org', 'influxdb_bucket']
         for var in global_vars:
             try:
                 self.settings[var] = config.get('openvpn-monitor', var)
@@ -214,7 +222,8 @@ class OpenvpnMgmtInterface(object):
             else:
                 warning('No compatible geoip1 or geoip2 data/libraries found.')
         except IOError:
-            warning('No compatible geoip1 or geoip2 data/libraries found.')
+            pass
+            #warning('No compatible geoip1 or geoip2 data/libraries found.')
 
         for _, vpn in list(self.vpns.items()):
             self._socket_connect(vpn)
@@ -283,7 +292,7 @@ class OpenvpnMgmtInterface(object):
         self.s.close()
 
     def send_command(self, command):
-        info('Sending command: {0!s}'.format(command))
+        #info('Sending command: {0!s}'.format(command))
         self._socket_send(command)
         if command.startswith('kill') or command.startswith('client-kill'):
             return
@@ -513,6 +522,75 @@ class OpenvpnMgmtInterface(object):
             return '{0!s}:{1!s}'.format(ip, port)
         else:
             return '{0!s}'.format(ip)
+
+
+class InfluxdbMetrics(object):
+    def __init__(self, cfg, monitor):
+        vpns = list(monitor.vpns.items())
+        for key, vpn in vpns:
+            if vpn['socket_connected']:
+                self.send_metrics(cfg, key, vpn)
+            else:
+                warning(f"Vpn {key} unavailable")
+
+    def send_metrics(self, cfg, vpn_id, vpn):
+        if vpn['state']['success'] == 'SUCCESS':
+            pingable = 1
+        else:
+            pingable = 0
+
+        connection = vpn['state']['connected']
+        nclients = vpn['stats']['nclients']
+        bytesin = vpn['stats']['bytesin']
+        bytesout = vpn['stats']['bytesout']
+        vpn_mode = vpn['state']['mode']
+        vpn_sessions = vpn['sessions']
+        local_ip = vpn['state']['local_ip']
+        remote_ip = vpn['state']['remote_ip']
+        up_since = vpn['state']['up_since']
+        show_disconnect = vpn['show_disconnect']
+
+        try:
+            with InfluxDBClient(url=cfg.settings['influxdb_url'], token=cfg.settings['influxdb_token'], org=cfg.settings['influxdb_org']) as _client:
+
+                bucket = cfg.settings['influxdb_bucket']
+                org=cfg.settings['influxdb_org']
+                measurement = 'vpn'
+                with _client.write_api(write_options=WriteOptions(batch_size=500,
+                                                      flush_interval=10_000,
+                                                      jitter_interval=2_000,
+                                                      retry_interval=5_000,
+                                                      max_retries=5,
+                                                      max_retry_delay=30_000,
+                                                      exponential_base=2)) as _write_client:
+
+                    _write_client.write(bucket, org,
+                        {"measurement": measurement, "tags": {"local_ip": str(local_ip), "username": "server"},
+                                                    "fields": {"pingable": pingable,
+                                                        "bytes_in": bytesin,
+                                                        "bytes_out": bytesout,
+                                                        "clients": nclients,
+                                                        "uptime": (datetime.now()-up_since).total_seconds()
+                                                        }}
+                    )
+
+                    for key, session in vpn_sessions.items():
+                        _write_client.write(bucket, org,
+                        {"measurement": measurement, "tags": {"username": session['username'],
+                                                        "local_ip": str(session['local_ip']),
+                                                        "remote_ip": str(session['remote_ip'])},
+                                                    "fields": {
+                                                        "bytes_in": session['bytes_recv'],
+                                                        "bytes_out": session['bytes_sent'],
+                                                        "connected_since": (datetime.now()-session['connected_since']).total_seconds(),
+                                                        "last_seen": (datetime.now()-session['last_seen']).total_seconds()
+                                                        }}
+                    )
+
+        except Exception as e:
+            warning("Error sending metrics", e)
+
+
 
 
 class OpenvpnHtmlPrinter(object):
@@ -873,8 +951,11 @@ class OpenvpnHtmlPrinter(object):
 
 def main(**kwargs):
     cfg = ConfigLoader(args.config)
-    monitor = OpenvpnMgmtInterface(cfg, **kwargs)
-    OpenvpnHtmlPrinter(cfg, monitor)
+    while True:
+        monitor = OpenvpnMgmtInterface(cfg, **kwargs)
+        InfluxdbMetrics(cfg, monitor)
+        #OpenvpnHtmlPrinter(cfg, monitor)
+        time.sleep(int(cfg.settings['interval']))
     if args.debug:
         pretty_vpns = pformat((dict(monitor.vpns)))
         debug("=== begin vpns\n{0!s}\n=== end vpns".format(pretty_vpns))
