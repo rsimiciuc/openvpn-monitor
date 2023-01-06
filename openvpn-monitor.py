@@ -569,6 +569,7 @@ class InfluxdbMetrics(object):
                                                     "fields": {"pingable": pingable,
                                                         "bytes_in": bytesin,
                                                         "bytes_out": bytesout,
+                                                        "bytes_total": bytesin + bytesout,
                                                         "clients": nclients,
                                                         "uptime": (datetime.now()-up_since).total_seconds()
                                                         }}
@@ -582,6 +583,7 @@ class InfluxdbMetrics(object):
                                                     "fields": {
                                                         "bytes_in": session['bytes_recv'],
                                                         "bytes_out": session['bytes_sent'],
+                                                        "bytes_total": session['bytes_recv'] + session['bytes_sent'],
                                                         "connected_since": (datetime.now()-session['connected_since']).total_seconds(),
                                                         "last_seen": (datetime.now()-session['last_seen']).total_seconds()
                                                         }}
