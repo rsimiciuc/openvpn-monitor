@@ -565,7 +565,7 @@ class InfluxdbMetrics(object):
                                                       exponential_base=2)) as _write_client:
 
                     _write_client.write(bucket, org,
-                        {"measurement": measurement, "tags": {"local_ip": str(local_ip), "username": "server"},
+                        {"measurement": measurement, "tags": {"local_ip": str(local_ip), "username": "server", "vpn_id": vpn_id},
                                                     "fields": {"pingable": pingable,
                                                         "bytes_in": bytesin,
                                                         "bytes_out": bytesout,
@@ -579,7 +579,8 @@ class InfluxdbMetrics(object):
                         _write_client.write(bucket, org,
                         {"measurement": measurement, "tags": {"username": session['username'],
                                                         "local_ip": str(session['local_ip']),
-                                                        "remote_ip": str(session['remote_ip'])},
+                                                        "remote_ip": str(session['remote_ip']),
+                                                        "vpn_id": vpn_id},
                                                     "fields": {
                                                         "bytes_in": session['bytes_recv'],
                                                         "bytes_out": session['bytes_sent'],
